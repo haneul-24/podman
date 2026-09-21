@@ -9,12 +9,17 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/coreos/go-systemd/v22/dbus"
+	"github.com/sirupsen/logrus"
+
 	"go.podman.io/common/libnetwork/pasta"
 	"go.podman.io/common/libnetwork/types"
 	netutil "go.podman.io/common/libnetwork/util"
+	systemdCommon "go.podman.io/common/pkg/systemd"
 	"go.podman.io/podman/v6/libpod/define"
 	"go.podman.io/podman/v6/libpod/events"
 	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/systemd"
 )
 
 func (ic *ContainerEngine) NetworkUpdate(_ context.Context, netName string, options entities.NetworkUpdateOptions) error {
@@ -218,7 +223,7 @@ func (ic *ContainerEngine) NetworkExists(_ context.Context, networkname string) 
 }
 
 // Network prune removes unused networks
-func (ic *ContainerEngine) NetworkPrune(_ context.Context, options entities.NetworkPruneOptions) ([]*entities.NetworkPruneReport, error) {
+func (ic *ContainerEngine) NetworkPrune(ctx context.Context, options entities.NetworkPruneOptions) ([]*entities.NetworkPruneReport, error) {
 	// get all filters
 	filters, err := netutil.GenerateNetworkPruneFilters(options.Filters)
 	if err != nil {
@@ -234,8 +239,41 @@ func (ic *ContainerEngine) NetworkPrune(_ context.Context, options entities.Netw
 		return nil, err
 	}
 
+	var conn *dbus.Conn
+	serviceNames := make(map[string]string)
+
+	if systemdCommon.RunsOnSystemd() {
+		conn, err = systemd.ConnectToDBUS()
+		if err != nil {
+			return nil, fmt.Errorf("connecting to systemd dbus: %w", err)
+		}
+		defer conn.Close()
+		serviceNames, err = getServiceNamesViaDBus(ctx, conn, nets)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	pruneReport := make([]*entities.NetworkPruneReport, 0, len(nets))
 	for _, net := range nets {
+		if net.Name == ic.Libpod.GetDefaultNetworkName() {
+			continue
+		}
+
+		if conn != nil {
+			serviceName := serviceNames[net.Name]
+			if serviceName != "" {
+				ch := make(chan string)
+				if _, err := conn.StopUnitContext(ctx, serviceName, "replace", ch); err != nil {
+					return nil, fmt.Errorf("stopping network %s: %w", net.Name, err)
+				}
+				logrus.Debugf("Waiting for systemd unit %s to stop", serviceName)
+				stopResult := <-ch
+				if stopResult != "done" && stopResult != "skipped" {
+					return nil, fmt.Errorf("unable to stop systemd unit %s: %s", serviceName, stopResult)
+				}
+			}
+		}
 		pruneReport = append(pruneReport, &entities.NetworkPruneReport{
 			Name:  net.Name,
 			Error: ic.Libpod.Network().NetworkRemove(net.Name),
@@ -256,6 +294,9 @@ func (ic *ContainerEngine) createDanglingFilterFunc(wantDangling bool) (types.Fi
 	for _, c := range cons {
 		nets, err := c.Networks()
 		if err != nil {
+			if errors.Is(err, define.ErrNoSuchCtr) || errors.Is(err, define.ErrCtrRemoved) {
+				continue
+			}
 			return nil, err
 		}
 		for _, n := range nets {

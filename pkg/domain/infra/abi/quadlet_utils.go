@@ -9,10 +9,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/coreos/go-systemd/v22/dbus"
 	"github.com/sirupsen/logrus"
+
+	"go.podman.io/common/libnetwork/types"
 	"go.podman.io/podman/v6/libpod/define"
 	"go.podman.io/podman/v6/pkg/domain/entities"
 	"go.podman.io/podman/v6/pkg/rootless"
@@ -399,4 +402,46 @@ func validateApplicationName(baseDir string, application string) error {
 	}
 
 	return nil
+}
+
+func getServiceNamesViaDBus(ctx context.Context, conn *dbus.Conn, nets []types.Network) (map[string]string, error) {
+	units, err := conn.ListUnitsByPatternsContext(ctx, []string{"loaded"}, []string{"*-network.service"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list network units via D-Bus: %w", err)
+	}
+
+	serviceNames := make(map[string]string)
+
+	for _, unit := range units {
+		prop, err := conn.GetUnitPropertyContext(ctx, unit.Name, "SourcePath")
+		if err != nil || prop == nil || prop.Value.Value() == nil {
+			continue
+		}
+
+		sourcePath, ok := prop.Value.Value().(string)
+		if !ok || !strings.HasSuffix(sourcePath, ".network") {
+			continue
+		}
+
+		execProp, err := conn.GetServicePropertyContext(ctx, unit.Name, "ExecStart")
+		if err != nil || execProp == nil || execProp.Value.Value() == nil {
+			continue
+		}
+
+		execStart := fmt.Sprintf("%v", execProp.Value.Value())
+		cleanedExecStart := strings.NewReplacer("[", " ", "]", " ").Replace(execStart)
+		tokens := strings.Fields(cleanedExecStart)
+
+		for _, net := range nets {
+			if _, ok := serviceNames[net.Name]; ok {
+				continue
+			}
+			if slices.Contains(tokens, net.Name) {
+				serviceNames[net.Name] = unit.Name
+				break
+			}
+		}
+	}
+
+	return serviceNames, nil
 }
