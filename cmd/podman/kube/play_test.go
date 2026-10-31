@@ -81,7 +81,7 @@ func TestReaderFromArgs(t *testing.T) {
 				podYAML,
 				serviceYAML,
 			},
-			expected: podYAML + "\n---\n" + serviceYAML,
+			expected: podYAML + "\n===\n" + serviceYAML,
 		},
 		{
 			name: "empty file and normal file",
@@ -89,7 +89,7 @@ func TestReaderFromArgs(t *testing.T) {
 				"",
 				secretYAML,
 			},
-			expected: "---\n" + secretYAML,
+			expected: "===\n" + secretYAML,
 		},
 		{
 			name: "files with only whitespace",
@@ -97,7 +97,7 @@ func TestReaderFromArgs(t *testing.T) {
 				"\n  \n",
 				namespaceYAML,
 			},
-			expected: "---\n" + namespaceYAML,
+			expected: "===\n" + namespaceYAML,
 		},
 	}
 
